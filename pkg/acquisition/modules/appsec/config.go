@@ -235,6 +235,7 @@ func (w *Source) Configure(ctx context.Context, yamlConfig []byte, logger *log.E
 	w.server.Protocols.SetHTTP2(true)
 
 	w.InChan = make(chan appsec.ParsedRequest)
+	w.done = make(chan struct{})
 	appsecCfg := appsec.AppsecConfig{Logger: w.logger.WithField("component", "appsec_config")}
 
 	// we keep the datasource name
@@ -454,13 +455,27 @@ func (w *Source) appsecHandler(rw http.ResponseWriter, r *http.Request) {
 
 	metrics.AppsecReqCounter.With(prometheus.Labels{"source": parsedRequest.RemoteAddrNormalized, "appsec_engine": parsedRequest.AppsecEngine}).Inc()
 
-	w.InChan <- parsedRequest
+	// Runners stop reading InChan once the source is shutting down: don't
+	// block http.Server.Shutdown waiting on a handler that can't be served.
+	select {
+	case w.InChan <- parsedRequest:
+	case <-w.done:
+		rw.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
 
 	/*
 		response is a copy of w.AppSecRuntime.Response that is safe to use.
 		As OutOfBand might still be running, the original one can be modified
 	*/
-	response := <-parsedRequest.ResponseChannel
+	var response appsec.AppsecTempResponse
+
+	select {
+	case response = <-parsedRequest.ResponseChannel:
+	case <-w.done:
+		rw.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
 
 	if response.InBandInterrupt {
 		metrics.AppsecBlockCounter.With(prometheus.Labels{"source": parsedRequest.RemoteAddrNormalized, "appsec_engine": parsedRequest.AppsecEngine}).Inc()

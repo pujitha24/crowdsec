@@ -17,6 +17,7 @@ import (
 
 	"github.com/crowdsecurity/go-cs-lib/ptr"
 
+	"github.com/crowdsecurity/crowdsec/pkg/appsec"
 	"github.com/crowdsecurity/crowdsec/pkg/csconfig"
 	"github.com/crowdsecurity/crowdsec/pkg/cwhub"
 )
@@ -407,6 +408,65 @@ func TestResolveAppsecConfigEntries(t *testing.T) {
 			got, err := resolveAppsecConfigEntries(tc.entries, hub)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+// A handler stuck waiting on a runner must give up once the source shuts down,
+// or http.Server.Shutdown never returns and a SIGHUP reload hangs.
+func TestAppsecHandlerReturnsOnShutdown(t *testing.T) {
+	tests := []struct {
+		name string
+		// runnerTakesRequest simulates a runner that accepted the request but never answers.
+		runnerTakesRequest bool
+	}{
+		{name: "no runner reads the request", runnerTakesRequest: false},
+		{name: "runner never answers", runnerTakesRequest: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := authTestSource(t, "", time.Second)
+			w.config.BodyReadTimeout = ptr.Of(time.Duration(0))
+			w.AppsecRuntime = &appsec.AppsecRuntimeConfig{}
+			w.InChan = make(chan appsec.ParsedRequest)
+			w.done = make(chan struct{})
+			w.AuthCache.Set("test-key", time.Now().Add(time.Minute))
+
+			if tc.runnerTakesRequest {
+				go func() { <-w.InChan }()
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			req.Header.Set(appsec.APIKeyHeaderName, "test-key")
+			req.Header.Set(appsec.IPHeaderName, "1.2.3.4")
+			req.Header.Set(appsec.VerbHeaderName, http.MethodGet)
+			req.Header.Set(appsec.HostHeaderName, "example.com")
+			req.Header.Set(appsec.URIHeaderName, "/")
+			rec := httptest.NewRecorder()
+
+			finished := make(chan struct{})
+
+			go func() {
+				w.appsecHandler(rec, req)
+				close(finished)
+			}()
+
+			select {
+			case <-finished:
+				t.Fatal("handler returned before shutdown")
+			case <-time.After(100 * time.Millisecond):
+			}
+
+			close(w.done)
+
+			select {
+			case <-finished:
+			case <-time.After(2 * time.Second):
+				t.Fatal("handler still blocked after shutdown")
+			}
+
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 		})
 	}
 }

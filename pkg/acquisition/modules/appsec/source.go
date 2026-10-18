@@ -23,6 +23,7 @@ type Source struct {
 	mux                   *http.ServeMux
 	server                *http.Server
 	InChan                chan appsec.ParsedRequest
+	done                  chan struct{} // closed when the source starts shutting down
 	AppsecRuntime         *appsec.AppsecRuntimeConfig
 	AppsecConfigs         map[string]appsec.AppsecConfig
 	lapiURL               string

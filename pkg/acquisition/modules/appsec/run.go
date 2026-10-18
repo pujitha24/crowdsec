@@ -98,6 +98,7 @@ func (w *Source) listenAndServe(ctx context.Context, t *tomb.Tomb) error {
 		return err
 	case <-t.Dying():
 		w.logger.Info("Shutting down Appsec server")
+		close(w.done)
 		// xx let's clean up the appsec runners :)
 		appsec.AppsecRulesDetails = make(map[int]appsec.RulesDetails)
 
